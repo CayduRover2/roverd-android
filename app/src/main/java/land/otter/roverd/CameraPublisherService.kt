@@ -92,7 +92,7 @@ class CameraPublisherService : Service() {
             stopSelf()
             return
         }
-        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+        if (config.cameraSource != "USB_WEBCAM" && Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             allowAutoRestart = false
             RoverRuntimeState.setCameraPipelineState(
                 running = false,
@@ -104,13 +104,19 @@ class CameraPublisherService : Service() {
             return
         }
 
+        // USB_WEBCAM is handled by RoverUvcSource through the Android USB host/UVC stack.
+        // Do not look for LENS_FACING_EXTERNAL here: Samsung/Android firmware does not
+        // consistently expose the C920 through Camera2 even though USB/UVC access works.
+        val effectiveConfig = config
+
         try {
             RoverRuntimeState.log("CAMERA publisher service starting")
-            streamer = Camera2H264Streamer(this, config) { reason ->
+            streamer = Camera2H264Streamer(this, effectiveConfig) { reason ->
                 handler.post { schedulePipelineRestart(reason) }
             }.also { it.start() }
             restartAttempt = 0
-            updateNotification("Camera ${config.cameraId} -> MediaMTX")
+            val sourceLabel = if (effectiveConfig.cameraSource == "USB_WEBCAM") "USB webcam ${effectiveConfig.cameraId}" else "Camera ${effectiveConfig.cameraId}"
+            updateNotification("$sourceLabel -> MediaMTX")
         } catch (t: Throwable) {
             streamer?.close()
             streamer = null
