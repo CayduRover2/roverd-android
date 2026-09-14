@@ -71,10 +71,13 @@ class MainActivity : Activity() {
     private var autoSideBrushSpeedView: EditText? = null
 
     private var cameraEnabledView: CheckBox? = null
+    private var cameraSourceUsbView: CheckBox? = null
     private var cameraIdView: Spinner? = null
     private var cameraSizeView: Spinner? = null
     private var cameraFpsView: Spinner? = null
     private var cameraRotationView: Spinner? = null
+
+    private var cameraInvertView: CheckBox? = null
     private var cameraExposureView: Spinner? = null
     private var cameraEncoderView: Spinner? = null
     private var cameraBitrateView: EditText? = null
@@ -233,10 +236,13 @@ class MainActivity : Activity() {
 
     private fun clearCameraUiReferences() {
         cameraEnabledView = null
+        cameraSourceUsbView = null
         cameraIdView = null
         cameraSizeView = null
         cameraFpsView = null
         cameraRotationView = null
+
+        cameraInvertView = null
         cameraExposureView = null
         cameraEncoderView = null
         cameraBitrateView = null
@@ -317,9 +323,20 @@ class MainActivity : Activity() {
         }
         root.addView(cameraEnabledView)
 
+        cameraSourceUsbView = CheckBox(this).apply {
+            text = "USB Webcam Mode (auto-detect Logitech C920 / UVC camera via OTG)"
+            isChecked = cfg.cameraSource == "USB_WEBCAM"
+        }
+        root.addView(cameraSourceUsbView)
+        root.addView(diagnosticText(10f).apply {
+            text = "USB Webcam: direct USB/UVC mode. The C920 is opened through the USB host stack, not Camera2.\n" +
+                "Enable above, SAVE + APPLY, and grant the Android USB permission if prompted."
+        })
+
         cameraChoices = readCameraChoices(cfg.cameraId)
-        cameraIdView = addSpinner(root, "Camera (raw Android ID + hardware info)", cameraChoices.map { it.label })
-        cameraIdView?.setSelection(cameraChoices.indexOfFirst { it.id == cfg.cameraId }.coerceAtLeast(0))
+        cameraIdView = addSpinner(root, "Camera source", cameraChoices.map { it.label })
+        val initialCameraId = if (cfg.cameraSource == "USB_WEBCAM") "USB_UVC" else cfg.cameraId
+        cameraIdView?.setSelection(cameraChoices.indexOfFirst { it.id == initialCameraId }.coerceAtLeast(0))
         cameraIdView?.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                 if (updatingCameraControls) return
@@ -332,6 +349,17 @@ class MainActivity : Activity() {
         cameraSizeView = addSpinner(root, "Capture resolution", emptyList())
         cameraFpsView = addSpinner(root, "AE target FPS range", emptyList())
         cameraRotationView = addSpinner(root, "Output rotation", emptyList())
+        cameraInvertView = CheckBox(this).apply {
+            text = "INVERT VIDEO (180Â°)"
+            isChecked = cfg.cameraRotation == 180
+            setOnCheckedChangeListener { _, checked ->
+                if (updatingCameraControls) return@setOnCheckedChangeListener
+                val target = if (checked) 180 else 0
+                val index = cameraRotationOptions.indexOfFirst { it.value == target }
+                if (index >= 0) cameraRotationView?.setSelection(index)
+            }
+        }
+        root.addView(cameraInvertView)
         cameraExposureView = addSpinner(root, "AE exposure compensation", emptyList())
 
         cameraEncoderNames = listOf("AUTO") + runCatching { CameraDiagnostics.h264SurfaceEncoders() }
@@ -557,7 +585,7 @@ class MainActivity : Activity() {
             appendLine("encoder pref  : ${cfg.cameraEncoderName}")
             appendLine("MediaMTX RTSP : ${cfg.mediaRtspPort}")
             appendLine("headlight cfg : enabled=${cfg.headlightEnabled} initialOn=${cfg.headlightInitialOn} current=${HeadlightController.isOn()}")
-            appendLine("camera API    : ${if (Build.VERSION.SDK_INT >= 21) "Camera2 + GLES streaming" else "legacy diagnostics only"}")
+            appendLine("camera API    : ${if (cfg.cameraSource == "USB_WEBCAM" || cfg.cameraId == "USB_UVC") "Direct USB/UVC + RootEncoder" else if (Build.VERSION.SDK_INT >= 21) "Camera2 + GLES streaming" else "legacy diagnostics only"}")
             append("publish URL   : ${effectiveCameraPublishUrl(cfg)}")
         }
     }
@@ -596,8 +624,11 @@ class MainActivity : Activity() {
                 emptyList()
             }
             .toMutableList()
+        // This is a real source selector, not a Camera2 ID. Direct UVC is deliberately listed
+        // even when Android's CameraManager reports zero external cameras.
+        choices.add(0, CameraChoice("USB_UVC", "USB UVC — Logitech C920 / UVC webcam (direct)"))
         if (savedId.isNotBlank() && choices.none { it.id == savedId }) {
-            choices.add(0, CameraChoice(savedId, "$savedId — saved ID (not currently enumerated)"))
+            choices.add(0, CameraChoice(savedId, "$savedId — saved source (not currently enumerated)"))
         }
         return choices.distinctBy { it.id }
     }
@@ -606,6 +637,53 @@ class MainActivity : Activity() {
         if (currentPage != Page.CAMERA) return
         updatingCameraControls = true
         try {
+            if (cameraId == "USB_UVC") {
+                cameraCatalog = null
+                cameraSizes = listOf(
+                    CameraSizeOption(640, 480),
+                    CameraSizeOption(1280, 720),
+                    CameraSizeOption(1920, 1080),
+                )
+                cameraSizeView?.adapter = ArrayAdapter(
+                    this,
+                    android.R.layout.simple_spinner_dropdown_item,
+                    cameraSizes.map {
+                        when {
+                            it.width * 3 == it.height * 4 -> "${it.label} (4:3)"
+                            it.width * 9 == it.height * 16 -> "${it.label} (16:9)"
+                            else -> it.label
+                        }
+                    },
+                )
+                val sizeIndex = cameraSizes.indexOfFirst { it.width == cfg.cameraWidth && it.height == cfg.cameraHeight }
+                cameraSizeView?.setSelection((if (preserveSaved && sizeIndex >= 0) sizeIndex else 0).coerceAtLeast(0))
+
+                cameraFpsOptions = listOf(
+                    CameraFpsOption(15, 15),
+                    CameraFpsOption(30, 30),
+                )
+                cameraFpsView?.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, cameraFpsOptions.map { it.label })
+                val fpsIndex = cameraFpsOptions.indexOfFirst { it.min == cfg.cameraFpsMin && it.max == cfg.cameraFpsMax }
+                cameraFpsView?.setSelection((if (preserveSaved && fpsIndex >= 0) fpsIndex else 1).coerceAtLeast(0))
+
+                cameraRotationOptions = listOf(
+                    RotationOption(0, "0° (USB camera native orientation)"),
+                    RotationOption(90, "90° clockwise"),
+                    RotationOption(180, "180°"),
+                    RotationOption(270, "270° clockwise"),
+                )
+                cameraRotationView?.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, cameraRotationOptions.map { it.label })
+                val rotationIndex = if (preserveSaved) cameraRotationOptions.indexOfFirst { it.value == cfg.cameraRotation } else 0
+                cameraRotationView?.setSelection(rotationIndex.coerceAtLeast(0))
+
+
+                cameraInvertView?.isChecked = (if (preserveSaved) cfg.cameraRotation else 0) == 180
+                cameraExposureValues = listOf(0)
+                cameraExposureView?.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("0 (UVC controls handled by webcam)"))
+                cameraExposureView?.setSelection(0)
+                RoverRuntimeState.log("CAMERA UI selected direct USB/UVC source")
+                return
+            }
             cameraCatalog = runCatching { CameraDiagnostics.modeCatalog(this, cameraId) }
                 .onFailure { RoverRuntimeState.log("CAMERA mode catalog failed id=$cameraId: ${it.stackTraceToString()}") }
                 .getOrNull()
@@ -614,7 +692,17 @@ class MainActivity : Activity() {
             cameraSizes = catalog?.sizes.orEmpty().ifEmpty {
                 listOf(CameraSizeOption(cfg.cameraWidth, cfg.cameraHeight))
             }
-            cameraSizeView?.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, cameraSizes.map { it.label })
+            cameraSizeView?.adapter = ArrayAdapter(
+                    this,
+                    android.R.layout.simple_spinner_dropdown_item,
+                    cameraSizes.map {
+                        when {
+                            it.width * 3 == it.height * 4 -> "${it.label} (4:3)"
+                            it.width * 9 == it.height * 16 -> "${it.label} (16:9)"
+                            else -> it.label
+                        }
+                    },
+                )
             val sizeIndex = if (preserveSaved) {
                 cameraSizes.indexOfFirst { it.width == cfg.cameraWidth && it.height == cfg.cameraHeight }
             } else {
@@ -644,6 +732,8 @@ class MainActivity : Activity() {
             val rotationIndex = if (preserveSaved) cameraRotationOptions.indexOfFirst { it.value == cfg.cameraRotation } else 0
             cameraRotationView?.setSelection(rotationIndex.coerceAtLeast(0))
 
+
+                cameraInvertView?.isChecked = (if (preserveSaved) cfg.cameraRotation else 0) == 180
             val minComp = catalog?.exposureCompMin ?: 0
             val maxComp = catalog?.exposureCompMax ?: 0
             cameraExposureValues = if (minComp <= maxComp) (minComp..maxComp).toList() else listOf(0)
@@ -788,9 +878,11 @@ class MainActivity : Activity() {
         if (startEvenIfUnchecked) cameraEnabledView?.isChecked = true
         val size = selectedCameraSize(old)
         val fps = selectedCameraFps(old)
+        val useUsbWebcam = cameraSourceUsbView?.isChecked ?: (old.cameraSource == "USB_WEBCAM")
         val cfg = old.copy(
-            cameraId = selectedCameraId().ifBlank { old.cameraId },
+            cameraId = if (useUsbWebcam) "USB_UVC" else selectedCameraId().ifBlank { old.cameraId },
             cameraEnabled = enabled,
+            cameraSource = if (useUsbWebcam) "USB_WEBCAM" else "PHONE",
             cameraWidth = size.width,
             cameraHeight = size.height,
             cameraFpsMin = fps.min,
